@@ -1,0 +1,29 @@
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+faers_radar_env/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Data (user should build locally)
+data/
+# If you want to keep the folder but not contents:
+# data/*
+# !data/.gitkeep
+
+# DuckDB / local DBs
+*.duckdb
+*.db
+
+# Logs
+logs/
+*.log
+

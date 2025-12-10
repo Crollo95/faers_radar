@@ -1,0 +1,8 @@
+duckdb
+pandas
+pyarrow
+requests
+beautifulsoup4
+tqdm
+
+matplotlib
