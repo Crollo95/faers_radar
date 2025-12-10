@@ -10,6 +10,8 @@ FAERS Radar is a research-oriented Python toolkit for working with **FAERS** (FD
 * 📊 Classical disproportionality analysis (ROR/PRR + CIs)
 * 🕒 Quarterly temporal signal computation (drug–event × time)
 * 🔥 Novel *emergence* and *trend* detection algorithms for **emerging safety signals**
+* 🧭 NEW: **Embedding-based structural novelty detection**
+  (unexpected drug–event associations given global co-occurrence structure)
 * 📓 Jupyter notebooks for exploration
 
 This project aims to make real-world pharmacovigilance research accessible, transparent, and fully reproducible.
@@ -39,8 +41,8 @@ Pharmacovigilance analysts and researchers use FAERS to detect:
 
 associations between *a drug* and *an adverse event* that occur more often than expected.
 
-These signals are **hypothesis-generating**, not proof of causality
-—but they often precede formal safety actions.
+These signals are **hypothesis-generating**, not proof of causality —
+but they often precede formal safety actions, labeling changes, or epidemiological studies.
 
 ---
 
@@ -50,29 +52,38 @@ FAERS Radar provides:
 
 ### 1. A *complete data engineering pipeline*
 
-from raw FDA zips → structured, deduplicated database using DuckDB.
+From raw FDA zips → structured, deduplicated database using DuckDB.
 
 ### 2. A *robust analytical core*
 
-implementing standard pharmacovigilance statistics:
+Implementing standard pharmacovigilance statistics:
 
 * **ROR** — Reporting Odds Ratio
 * **PRR** — Proportional Reporting Ratio
-* With confidence intervals and contingency tables (N11, N10, …)
+* Confidence intervals and full N11/N10/N01/N00 contingency tables
 
 ### 3. A *temporal modeling layer*
 
-computing ROR per **drug × event × quarter** to detect changes over time.
+Computing ROR per **drug × event × quarter** to detect changes over time.
 
-### 4. A *novel research layer*
+### 4. A *novel temporal novelty layer*
 
-based on:
+Based on:
 
 * **emergence score** — how surprising the latest ROR is vs history
 * **trend score** — slope of log-ROR over time
-* **composite signal score** — innovation: signals that are strong + trending up
+* **composite temporal score** — signals that are strong + trending upward
 
-This architecture supports advanced pharmacovigilance, signal prioritization, ML research, and exploratory data science.
+### 5. A *structural novelty layer* (NEW)
+
+Using low-rank **drug–event embeddings**:
+
+* Builds a global co-occurrence matrix
+* Learns latent factors via truncated SVD
+* Detects **unexpected drug–event associations**
+  (e.g., unusually high reporting relative to model expectations)
+
+Together, these layers support signal prioritization, safety hypothesis generation, machine learning research, and exploratory drug safety analytics.
 
 ---
 
@@ -82,19 +93,21 @@ This architecture supports advanced pharmacovigilance, signal prioritization, ML
 faers_radar/
 │
 ├── faers_signals/
-│   ├── download.py          # Download FAERS zips from FDA
-│   ├── parse_ascii.py       # Extract + parse ASCII FAERS files
-│   ├── dedup.py             # FDA-style deduplication
-│   ├── drug_normalization.py# Normalize drug names (brand/generic variants)
-│   ├── signals_classical.py # ROR/PRR disproportionality
-│   ├── signals_temporal.py  # Quarterly time-series aggregation
-│   └── emergence.py         # Emergence + slope-based novelty
+│   ├── download.py           # Download FAERS zips
+│   ├── parse_ascii.py        # Extract + parse ASCII FAERS files
+│   ├── dedup.py              # FDA-style deduplication
+│   ├── drug_normalization.py # Normalize drug names
+│   ├── signals_classical.py  # ROR/PRR disproportionality
+│   ├── signals_temporal.py   # Quarterly time-series aggregation
+│   ├── emergence.py          # Emergence + trend novelty
+│   └── embeddings.py         # Embedding-based structural novelty (NEW)
 │
 ├── notebooks/
-│   ├── 01_inspect.ipynb          # Inspect warehouse
-│   ├── 02_drug_level_signals.ipynb
-│   ├── 03_temporal_signals.ipynb
-│   └── 04_temporal_novelty.ipynb
+│   ├── 01_inspect.ipynb             # Inspect warehouse
+│   ├── 02_drug_level_signals.ipynb  # Classical signals
+│   ├── 03_temporal_signals.ipynb    # Quarterly ROR
+│   ├── 04_temporal_novelty.ipynb    # Emergence + trend
+│   └── 05_embedding_novelty.ipynb   # Structural novelty (NEW)
 │
 ├── requirements.txt
 ├── .gitignore
@@ -105,176 +118,183 @@ faers_radar/
 
 # 🧬 **Methodology Overview (Didactic Explanation)**
 
-This section explains *in simple terms* the analytical pipeline.
+This section explains *in simple terms* how the entire analysis works.
 
 ---
 
-## 1️⃣ Download & Parse FAERS Data (2019 → present)
+## 1️⃣ Download & Parse FAERS Data
 
-FAERS releases quarterly ASCII zip files such as:
+FAERS releases quarterly ASCII zip files (e.g., `2021Q4_ascii.zip`).
+Each contains tables:
 
-```
-2020Q1_ascii.zip
-2020Q2_ascii.zip
-...
-```
+* **DEMO**, **DRUG**, **REAC**, **OUTC**, **RPSR**, **THER**, **INDI**
 
-Each contains tables like:
+Challenges we solve:
 
-* **DEMO** — patient demographics
-* **DRUG** — drugs involved
-* **REAC** — reported reactions
-* **OUTC** — outcomes
-* **RPSR**, **THER**, **INDI**
+* mixed encodings (Latin-1 vs UTF-8)
+* inconsistent folder names
+* changing file naming conventions
+* malformed rows
 
-We use a robust parser that handles:
-
-* mixed encodings (latin-1)
-* changing directory structures
-* variations in filenames
-* malformed rows (skipped safely)
-
-Parsed data is stored in **DuckDB**, a fast embedded analytical database.
+Everything is loaded into a unified **DuckDB warehouse**.
 
 ---
 
 ## 2️⃣ FDA-Style Deduplication
 
-The same case can be reported multiple times (updates, follow-ups).
-The FDA recommends keeping **the most recent version** per `caseid`.
+A single adverse event case may be updated over time.
 
 We:
 
-1. Sort by `fda_dt` (report date)
-2. Keep the latest record per `caseid`
-3. Apply same dedup logic to `DRUG`, `REAC`, etc. based on consistent `primaryid` mapping
+1. Sort reports by FDA receipt date
+2. Keep only the **latest version** per `caseid`
+3. Use consistent `primaryid` keys across DEMO/DRUG/REAC tables
 
-This produces:
-
-* `demo_dedup`
-* `drug_dedup`
-* `reac_dedup`
-* …
-
-These are the clean base tables for all analyses.
+This produces clean deduplicated tables, e.g. `demo_dedup`, `drug_dedup`, `reac_dedup`.
 
 ---
 
 ## 3️⃣ Drug Name Normalization
 
-FAERS drug names vary:
+Drug names are messy in FAERS:
 
 ```
-"ATORVASTATIN"
-"Atorvastatin 40 MG"
+"Atorvastatin"
+"ATORVASTATINA"
+"Atorvastatin Calcium 40MG"
 "ATORVASTATIN®"
-"ATORVASTATINE" (misspelling)
-"ATORVASTATIN TAB"
 ```
 
-We normalize by:
+We normalize using heuristics that remove:
 
-* uppercasing
-* removing dosage (e.g., “20 mg”, “0.5 mL”)
-* removing punctuation
-* removing trademark symbols
-* collapsing whitespace
+* dosages
+* formulations
+* trademarks
+* punctuation
+* casing differences
 
-This produces a canonical `drugname_norm`.
+This yields a canonical `drugname_norm`.
 
 ---
 
-## 4️⃣ Classical Disproportionality (Global Analysis)
+## 4️⃣ Classical Disproportionality (ROR / PRR)
 
-For each (drug, adverse event) pair:
-
-We build the contingency table:
+For each drug–event pair, we compute:
 
 |                  | event present | event absent |
 | ---------------- | ------------- | ------------ |
 | **drug present** | N11           | N10          |
 | **drug absent**  | N01           | N00          |
 
-From this we calculate:
+Then:
 
-* **ROR** = (N11 / N10) / (N01 / N00)
-* **PRR** = risk_drug / risk_other
-* CIs via log-ROR
+* **ROR** = (N11/N10) / (N01/N00)
+* **PRR**
+* Confidence intervals
 
-The notebook `02_drug_level_signals.ipynb` covers this.
+These form the backbone of many safety surveillance systems.
 
 ---
 
-## 5️⃣ Temporal Signal Engine (Quarterly ROR)
+## 5️⃣ Temporal Signal Engine (Quarterly)
 
-We compute ROR **per quarter**:
-
-```
-(drug, PT, year, quarter) → ROR_t
-```
-
-This gives a time series per pair, e.g.:
+We compute ROR per quarter:
 
 ```
-Q1 2019 → 1.2
-Q2 2019 → 1.3
-Q3 2019 → 2.1
-...
-Q2 2024 → 5.6
+(drug, event, year, quarter) → ROR_t
 ```
 
-Stored in:
+This allows us to see *trends* rather than only snapshot associations.
+
+The table is stored as:
 
 ```
 signals_quarterly
 ```
 
-This is the basis of all temporal novelty analysis.
-
 ---
 
-## 6️⃣ Novelty Layer: Emergence & Trend Scores
+## 6️⃣ Novelty Layer I — Temporal Novelty
 
-### 🔥 **Emergence score (emergence_z)**
+*(Emergence & Trend)*
 
-“How surprising is the **latest** ROR compared with the drug’s historical baseline?”
+### 🔥 Emergence score
 
-* Compute log(ROR)
-* Compare last point vs baseline mean/std
-* Z-score = (latest - baseline_mean) / sd
+“How surprising is the latest ROR vs historical baseline?”
 
-High emergence_z = sudden recent increase.
+* compute log(ROR)
+* baseline = all past quarters
+* Z-score of last value vs baseline variance
 
----
+### 📈 Trend score
 
-### 📈 **Trend score (slope_log_ror)**
+“Is the association increasing over time?”
 
-“Is ROR increasing over time overall?”
+* fit a linear regression: `log(ROR) ~ time`
+* slope > 0 ⇒ upward trend
 
-* Fit a simple linear regression:
-  `log(ROR) ~ time`
-* Use the slope as an indicator of trend
-
-Positive slope = upward trend.
-
----
-
-### ⭐ **Composite Signal Score**
-
-We combine the two (plus current ROR strength):
+### ⭐ Composite temporal score
 
 ```
-signal_score = max(slope_log_ror, 0) 
-               * emergence_z
-               * log(latest_ror + 1)
+signal_score =
+    max(slope_log_ror, 0)
+  * emergence_z
+  * log(latest_ror + 1)
 ```
 
-> High score =
-> **currently strong** + **increasing over time** + **recent jump**.
+This prioritizes:
 
-This is conceptually similar to early-warning indicators used in surveillance systems.
+* strong associations
+* that are trending upward
+* with a recent jump
 
-The notebook `04_temporal_novelty.ipynb` explores this.
+---
+
+## 7️⃣ Novelty Layer II — **Structural Novelty (NEW)**
+
+*(Embedding-based detection of unexpected associations)*
+
+FAERS can be viewed as a **drug × event matrix**:
+
+```
+          Event1  Event2  Event3 ...
+DrugA       12      0       4
+DrugB        2      5      11
+DrugC        0      8       1
+...
+```
+
+We aggregate total co-occurrence counts across years:
+
+```
+(drug, event) → N11_total
+```
+
+Then we:
+
+1. Build a sparse matrix of **log(1 + N11_total)**
+2. Fit a **low-rank model** using Truncated SVD (latent factors)
+3. Predict expected log-co-occurrence from embeddings
+4. Compute **structural novelty** via residuals:
+
+```
+structural_z =
+    (observed_log - predicted_log)
+    standardized across all pairs
+```
+
+### Interpretation:
+
+*High structural_z ⇒ the drug–event pair occurs **much more often** than predicted by the global co-occurrence structure.*
+
+This is **orthogonal** to temporal novelty:
+
+* Temporal novelty asks: *Is it increasing suddenly?*
+* Structural novelty asks: *Is it unusual in general compared to similar drugs and events?*
+
+This combination is extremely powerful for signal prioritization.
+
+The notebook `05_embedding_novelty.ipynb` demonstrates this.
 
 ---
 
@@ -296,7 +316,7 @@ pip install -r requirements.txt
 python -m faers_signals.download
 ```
 
-### Step 2: Parse & load into DuckDB
+### Step 2: Parse into DuckDB
 
 ```bash
 python -m faers_signals.parse_ascii
@@ -320,26 +340,27 @@ python -m faers_signals.drug_normalization
 python -m faers_signals.signals_temporal
 ```
 
-Open the notebooks in **notebooks/** for exploration.
+### Step 6 (optional): Compute structural novelty
+
+Using notebooks or the Python API.
 
 ---
 
-# 📊 Example: Compute temporal emergence for a drug
+# 📊 Example: Temporal emergence for a drug
 
 ```python
 from faers_signals.emergence import compute_emergence_scores_for_drug
-from faers_signals.config import WAREHOUSE_DB_PATH
 import duckdb
+from faers_signals.config import WAREHOUSE_DB_PATH
 
 con = duckdb.connect(str(WAREHOUSE_DB_PATH))
-
 em = compute_emergence_scores_for_drug("ATORVASTATIN")
 em.head()
 ```
 
 ---
 
-# 📈 Example: Global emerging signals
+# 🔍 Example: Global emerging signals
 
 ```python
 from faers_signals.emergence import compute_global_emergence_scores
@@ -350,15 +371,29 @@ global_em.head(20)
 
 ---
 
+# 🔮 Example: Structural novelty (embedding-based)
+
+```python
+from faers_signals.embeddings import compute_embedding_novelty
+
+cooc, drug_emb, event_emb, novelty = compute_embedding_novelty()
+novelty.head(20)
+```
+
+This ranks drug–event pairs by **unexpectedness** relative to the global FAERS structure.
+
+---
+
 # 📚 **Disclaimer**
 
-FAERS is a **spontaneous reporting system**. Signals detected here:
+FAERS is a **spontaneous reporting system**.
+Signals detected here:
 
 * **do not establish causality**
 * may reflect reporting biases
 * require clinical and epidemiological investigation
 
-This software is intended for research and educational purposes only.
+FAERS Radar is intended for research and educational purposes only.
 
 ---
 
@@ -368,7 +403,8 @@ Pull requests are welcome!
 Useful contributions include:
 
 * additional signal detection models
-* embedding-based novelty
+* improved time-series analysis
+* embedding-based enhancements
 * ATC/RxNorm integration
 * UI dashboards (Streamlit)
 
